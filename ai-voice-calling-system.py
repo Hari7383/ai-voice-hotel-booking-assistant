@@ -1,4 +1,4 @@
-import speech_recognition as sr
+import speech_recognition as sr #type: ignore
 import datetime
 import sys
 import re
@@ -12,8 +12,10 @@ BOOKING_FILE = "bookings.json"
 
 # ================= INIT =================
 recognizer = sr.Recognizer()
-recognizer.dynamic_energy_threshold = True
-recognizer.pause_threshold = 0.8
+recognizer.energy_threshold = 300
+recognizer.pause_threshold = 1
+recognizer.non_speaking_duration = 0.5
+
 mic = sr.Microphone()
 
 # ================= SESSION =================
@@ -21,16 +23,27 @@ session = {
     "state": "GREETING",
     "service": None,
     "name": None,
+    "rooms": None,
     "checkin": None,
     "checkout": None,
     "guests": None
+}
+
+# ================= NUMBER WORD MAP =================
+NUMBER_MAP = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+    "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19,
+    "twenty": 20
 }
 
 # ================= TTS =================
 def speak(text):
     engine = pyttsx3.init()
     engine.setProperty("rate", 170)
-    print("AI Caller Assistant:", text)
+    print("AI Assistant:", text)
     engine.say(text)
     engine.runAndWait()
     engine.stop()
@@ -63,7 +76,7 @@ def extract_date(text):
 
 def is_valid_booking_date(date_obj):
     today = datetime.date.today()
-    max_date = today + datetime.timedelta(days=240)  # 8 months
+    max_date = today + datetime.timedelta(days=240)
 
     if date_obj < today:
         return False, "You cannot book for past dates."
@@ -71,10 +84,18 @@ def is_valid_booking_date(date_obj):
         return False, "Booking is allowed only within the next 8 months."
     return True, None
 
-def extract_guests(text):
+def extract_number(text):
+    # Try digits first
     match = re.search(r'\d+', text)
     if match:
         return int(match.group())
+
+    # Try number words
+    words = text.split()
+    for word in words:
+        if word in NUMBER_MAP:
+            return NUMBER_MAP[word]
+
     return None
 
 # ================= MAIN LOGIC =================
@@ -106,6 +127,26 @@ def handle_input(text):
     # ASK NAME
     if session["state"] == "ASK_NAME":
         session["name"] = text.title()
+
+        if session["service"] == "room":
+            session["state"] = "ASK_ROOMS"
+            speak("How many rooms would you like to book?")
+        else:
+    
+            session["rooms"] = 1   
+            session["state"] = "ASK_CHECKIN"
+            speak("Please tell me the booking date.")
+
+        return
+
+    # ASK ROOMS
+    if session["state"] == "ASK_ROOMS":
+        rooms = extract_number(text)
+        if rooms is None:
+            speak("Please tell me the number of rooms.")
+            return
+
+        session["rooms"] = rooms
         session["state"] = "ASK_CHECKIN"
         speak("Please tell me the check in date.")
         return
@@ -150,8 +191,8 @@ def handle_input(text):
 
     # ASK GUESTS
     if session["state"] == "ASK_GUESTS":
-        guests = extract_guests(text)
-        if not guests:
+        guests = extract_number(text)
+        if guests is None:
             speak("Please tell me the number of guests.")
             return
 
@@ -162,27 +203,28 @@ def handle_input(text):
             f"Please confirm your booking details. "
             f"Name: {session['name']}. "
             f"Service: {session['service']}. "
+            f"Rooms: {session['rooms']}. "
             f"Check in: {session['checkin']}. "
             f"Check out: {session['checkout']}. "
             f"Guests: {session['guests']}. "
-            f"Say yes or correct to confirm. "
-            f"If you want to change date say change date."
+            f"Say yes to confirm or say change date."
         )
         return
 
     # CONFIRM
     if session["state"] == "CONFIRM":
 
-        if any(word in text for word in ["change date", "change the date"]):
+        if "change date" in text:
             session["state"] = "ASK_CHECKIN"
             speak("Please provide the new check in date.")
             return
 
-        if any(word in text for word in ["yes", "correct", "confirm"]):
+        if any(word in text for word in ["yes", "confirm", "correct"]):
 
             booking_data = {
                 "name": session["name"],
                 "service": session["service"],
+                "rooms": session["rooms"],
                 "checkin": str(session["checkin"]),
                 "checkout": str(session["checkout"]),
                 "guests": session["guests"],
@@ -193,32 +235,10 @@ def handle_input(text):
             speak("Your booking has been confirmed successfully. Thank you.")
             sys.exit()
 
-        speak("Please say yes to confirm or say change date to modify your booking.")
+        speak("Please say yes to confirm or say change date.")
         return
 
-# ================= AUDIO CALLBACK =================
-def audio_callback(recognizer, audio):
-    try:
-        text = recognizer.recognize_google(audio)
-        text = text.lower().strip()
-
-        if not text:
-            return
-
-        print("User:", text)
-        handle_input(text)
-
-    except sr.UnknownValueError:
-        pass
-    except sr.RequestError as e:
-        print("Speech recognition error:", e)
-
-def start_background_listening():
-    print("Listening continuously...")
-    stop_listening = recognizer.listen_in_background(mic, audio_callback)
-    return stop_listening
-
-# ================= START =================
+# ================= MAIN LOOP =================
 def main():
     intro = (
         "Hello. I am an AI assistant for hotel room booking, "
@@ -227,15 +247,38 @@ def main():
     )
     speak(intro)
 
-    stop_listener = start_background_listening()
+    # Adjust mic noise
+    with mic as source:
+        recognizer.adjust_for_ambient_noise(source, duration=1)
 
-    try:
-        while True:
-            pass
-    except KeyboardInterrupt:
-        stop_listener(wait_for_stop=False)
-        print("Assistant stopped.")
+    while True:
+        try:
+            with mic as source:
+                print("Listening...")
+                audio = recognizer.listen(
+                    source,
+                    timeout=10,
+                    phrase_time_limit=8
+                )
 
+            text = recognizer.recognize_google(audio)
+            text = text.lower().strip()
+
+            if text:
+                print("User:", text)
+                handle_input(text)
+
+        except sr.WaitTimeoutError:
+            print("Listening timeout...")
+        except sr.UnknownValueError:
+            print("Could not understand audio.")
+        except sr.RequestError as e:
+            print("Speech recognition error:", e)
+        except KeyboardInterrupt:
+            print("Assistant stopped.")
+            sys.exit()
+
+# ================= START =================
 if __name__ == "__main__":
     print("Starting AI Voice Booking Assistant...")
     main()
